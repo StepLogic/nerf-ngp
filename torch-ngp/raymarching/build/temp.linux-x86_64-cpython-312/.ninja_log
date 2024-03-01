@@ -1,0 +1,3 @@
+# ninja log v5
+0	19421	1708965524959362322	/mnt/workspace/torch-ngp/raymarching/build/temp.linux-x86_64-cpython-312/mnt/workspace/torch-ngp/raymarching/src/bindings.o	98697751a944987e
+36	50970	1708965784188614039	/mnt/workspace/torch-ngp/raymarching/build/temp.linux-x86_64-cpython-312/mnt/workspace/torch-ngp/raymarching/src/raymarching.o	7315b5150c65efbd

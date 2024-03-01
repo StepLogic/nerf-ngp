@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="$PROJECT_DIR$/apex" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/instant-ngp" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/ngp_pl" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tiny-cuda-nn" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tiny-cuda-nn/dependencies/cutlass" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/tiny-cuda-nn/dependencies/fmt" vcs="Git" />
+  </component>
+</project>

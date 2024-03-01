@@ -1,0 +1,3 @@
+# ninja log v5
+0	18898	1708966030437999890	/mnt/workspace/torch-ngp/gridencoder/build/temp.linux-x86_64-cpython-312/mnt/workspace/torch-ngp/gridencoder/src/bindings.o	aac36b9915462eba
+0	100827	1708966112353129671	/mnt/workspace/torch-ngp/gridencoder/build/temp.linux-x86_64-cpython-312/mnt/workspace/torch-ngp/gridencoder/src/gridencoder.o	1b58a1c3f16932ca
