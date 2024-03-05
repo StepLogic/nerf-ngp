@@ -455,7 +455,8 @@ class Trainer(object):
             model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank])
         self.model = model
-
+        self.model.update_optimizer = self.init_optimizer
+        self.init_optimizer(optimizer)
         if isinstance(criterion, nn.Module):
             criterion.to(self.device)
         self.criterion = criterion
@@ -530,14 +531,18 @@ class Trainer(object):
             self.clip_loss.prepare_text([self.opt.clip_text])  # only support one text prompt now...
         self.init_optimizer(optimizer)
 
-    def init_optimizer(self, optimizer):
-        if optimizer is None:
+    def init_optimizer(self, optimizer=None
+                       , params=None):
+        if not params is None:
+            self.optimizer = optim.Adam(self.model.parameters(), lr=0.001, weight_decay=5e-4)  # naive adam
+            return
+        if optimizer is None and self.model is not None:
             self.optimizer = optim.Adam(self.model.parameters(), lr=0.001, weight_decay=5e-4)  # naive adam
         else:
             try:
-              self.optimizer = optimizer(self.model)
+                self.optimizer = optimizer(self.model)
             except:
-                self.optimizer=optimizer
+                self.optimizer = optimizer
         if self.scheduler is None:
             self.lr_scheduler = optim.lr_scheduler.LambdaLR(self.optimizer, lr_lambda=lambda epoch: 1)  # fake scheduler
         else:
@@ -601,11 +606,12 @@ class Trainer(object):
         #     gt_rgb = images[..., :3] * images[..., 3:] + bg_color * (1 - images[..., 3:])
         # else:
         #     gt_rgb = images
-        self.model.set_optimizer(self.optimizer)
-        outputs = self.model.train_render(rays_o, rays_d, inds=data["inds"], loss=self.criterion, gt_rgb=images,
-                                          staged=False, bg_color=bg_color,
-                                          perturb=True, force_all_rays=False if self.opt.patch_size == 1 else True,
-                                          **vars(self.opt))
+
+        with torch.cuda.amp.autocast():
+            outputs = self.model.train_render(rays_o, rays_d, inds=data["inds"], loss=self.criterion, gt_rgb=images,
+                                              staged=False, bg_color=bg_color,
+                                              perturb=True, force_all_rays=False if self.opt.patch_size == 1 else True,
+                                              **vars(self.opt))
         # outputs = self.model.render(rays_o, rays_d, staged=False, bg_color=bg_color, perturb=True,
         # force_all_rays=True, **vars(self.opt)) breakpoint()
         self.init_optimizer(self.model.optimizer)
@@ -623,8 +629,7 @@ class Trainer(object):
         #
         #     torch_vis_2d(gt_rgb[0])
         #     torch_vis_2d(pred_rgb[0])
-        #
-        #     # LPIPS loss [not useful...]
+        #     LPIPS loss [not useful...]
         #     loss = loss + 1e-3 * self.criterion_lpips(pred_rgb, gt_rgb)
 
         # special case for CCNeRF's rank-residual training
@@ -685,10 +690,12 @@ class Trainer(object):
 
         pred_rgb = outputs['image'].reshape(B, H, W, 3)
         pred_depth = outputs['depth'].reshape(B, H, W)
+        del outputs["image"]
+        del outputs["depth"]
 
         loss = self.criterion(pred_rgb, gt_rgb).mean()
 
-        return pred_rgb, pred_depth, gt_rgb, loss
+        return pred_rgb, pred_depth, gt_rgb, loss, outputs
 
     # moved out bg_color and perturb for more flexible control...
     def test_step(self, data, bg_color=None, perturb=False):
@@ -1044,9 +1051,9 @@ class Trainer(object):
 
             for data in loader:
                 self.local_step += 1
-
+                combined_objects = {}
                 with torch.cuda.amp.autocast(enabled=self.fp16):
-                    preds, preds_depth, truths, loss = self.eval_step(data)
+                    preds, preds_depth, truths, loss, outputs = self.eval_step(data)
 
                 # all_gather/reduce the statistics (NCCL only support all_*)
                 if self.world_size > 1:
@@ -1058,6 +1065,11 @@ class Trainer(object):
                     dist.all_gather(preds_list, preds)
                     preds = torch.cat(preds_list, dim=0)
 
+                    for label, pred_rgb in outputs.items():
+                        combined_objects[label] = all_gather([torch.zeros_like(pred_rgb).to(self.device) for _ in
+                                                              range(self.world_size)],
+                                                             preds_rgb)  # [[B, ...], [B, ...], ...]
+
                     preds_depth_list = [torch.zeros_like(preds_depth).to(self.device) for _ in
                                         range(self.world_size)]  # [[B, ...], [B, ...], ...]
                     dist.all_gather(preds_depth_list, preds_depth)
@@ -1067,7 +1079,9 @@ class Trainer(object):
                                    range(self.world_size)]  # [[B, ...], [B, ...], ...]
                     dist.all_gather(truths_list, truths)
                     truths = torch.cat(truths_list, dim=0)
-
+                else:
+                    for label, pred_rgb in outputs.items():
+                        combined_objects[label] = preds_rgb  # [[B, ...], [B, ...], ...]
                 loss_val = loss.item()
                 total_loss += loss_val
 
@@ -1076,7 +1090,7 @@ class Trainer(object):
 
                     for metric in self.metrics:
                         metric.update(preds, truths)
-
+                    # breakpoint()
                     # save image
                     save_path = os.path.join(self.workspace, 'validation', f'{name}_{self.local_step:04d}_rgb.png')
                     save_path_depth = os.path.join(self.workspace, 'validation',
@@ -1099,6 +1113,12 @@ class Trainer(object):
 
                     pbar.set_description(f"loss={loss_val:.4f} ({total_loss / self.local_step:.4f})")
                     pbar.update(loader.batch_size)
+                    for label, image in combined_objects.items():
+                        image = image[0].detach().cpu().numpy()
+                        image = (image * 255).astype(np.uint8)
+                        save_path = os.path.join(self.workspace, 'validation',
+                                                 f'{name}_{label}_{self.local_step:04d}_rgb.png')
+                        cv2.imwrite(save_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
         average_loss = total_loss / self.local_step
         self.stats["valid_loss"].append(average_loss)
@@ -1132,6 +1152,7 @@ class Trainer(object):
             'epoch': self.epoch,
             'global_step': self.global_step,
             'stats': self.stats,
+            "semantic_objects": self.model.semantic_objects
         }
 
         if self.model.cuda_ray:
@@ -1202,6 +1223,7 @@ class Trainer(object):
             self.log("[INFO] loaded model.")
             return
 
+        self.model.add_heads_from_checkpoint(checkpoint_dict["semantic_objects"])
         missing_keys, unexpected_keys = self.model.load_state_dict(checkpoint_dict['model'], strict=False)
         self.log("[INFO] loaded model.")
         if len(missing_keys) > 0:
@@ -1223,6 +1245,7 @@ class Trainer(object):
 
         self.stats = checkpoint_dict['stats']
         self.epoch = checkpoint_dict['epoch']
+
         self.global_step = checkpoint_dict['global_step']
         self.log(f"[INFO] load at epoch {self.epoch}, global step {self.global_step}")
 

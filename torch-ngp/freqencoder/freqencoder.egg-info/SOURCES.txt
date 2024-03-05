@@ -1,6 +1,6 @@
 setup.py
-/mnt/workspace/torch-ngp/freqencoder/src/bindings.cpp
-/mnt/workspace/torch-ngp/freqencoder/src/freqencoder.cu
+/home/nerf-ngp/torch-ngp/freqencoder/src/bindings.cpp
+/home/nerf-ngp/torch-ngp/freqencoder/src/freqencoder.cu
 freqencoder.egg-info/PKG-INFO
 freqencoder.egg-info/SOURCES.txt
 freqencoder.egg-info/dependency_links.txt

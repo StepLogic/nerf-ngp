@@ -49,20 +49,26 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
         self.encoder_dir = MultiModelList([_encoder_dir])
         self.sigma_net = MultiModelList([_sigma_net])
         self.color_net = MultiModelList([_color_net])
-        self.optimizer=None
+        self.optimizer = None
+        self.update_optimizer = None
         # self.yolo = SemanticExtractor()
         # self.model = NeRFNetwork(*args, **kwargs)
 
+    def add_heads_from_checkpoint(self, semantic_objects):
+        for obj in semantic_objects:
+            self.add_new_head(obj)
+
     def add_new_head(self, label):
         if not label in self.semantic_objects:
-            print("Adding New Head")
+            print("\nAdding New Head\n")
             self.semantic_objects.append(label)
             _encoder, _encoder_dir, _sigma_net, _color_net = self.init_submodule()
             self.encoder.append(_encoder)
             self.encoder_dir.append(_encoder_dir)
             self.sigma_net.append(_sigma_net)
             self.color_net.append(_color_net)
-            self.optimizer(self)
+            if self.update_optimizer is not None:
+                self.update_optimizer(params=self.get_params(lr=1e-2))
 
     def init_submodule(self):
         encoder = tcnn.Encoding(
@@ -114,7 +120,7 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
 
     def density(self, x, label=None, ):
         # x: [N, 3], in [-bound, bound]
-        if label is not None:
+        if label is not None and label != "all":
             self.add_new_head(label)
         x = (x + self.bound) / (2 * self.bound)  # to [0, 1]
         if label in self.semantic_objects:
@@ -141,7 +147,7 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
     def color(self, x, d, label=None, mask=None, geo_feat=None, **kwargs):
         # x: [N, 3] in [-bound, bound]
         # mask: [N,], bool, indicates where we actually needs to compute rgb.
-        if label is not None:
+        if label is not None and label != "all":
             self.add_new_head(label)
         x = (x + self.bound) / (2 * self.bound)  # to [0, 1]
 
@@ -181,34 +187,39 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
         else:
             rgbs = h
         return rgbs
+
     def set_optimizer(self, optimizer):
-        self.optimizer =optimizer
+        self.optimizer = optimizer
+
     def forward(self, x, d, label=None):
         # x: [N, 3], in [-bound, bound]
         # d: [N, 3], nomalized in [-1, 1]
         # sigma
         x = (x + self.bound) / (2 * self.bound)  # to [0, 1]
-        if label is not None:
+        if label is not None and label != "all":
             if not label in self.semantic_objects:
-                self.semantic_objects.append(label)
+                if len(self.semantic_objects) == 0:
+                    self.semantic_objects.append(label)
+                else:
+                    self.add_new_head(label)
+
         if label in self.semantic_objects:
             idx = self.semantic_objects.index(label)
             x = self.encoder[idx](x)
             h = self.sigma_net[idx](x)
         elif label == 'all':
+            print(f"Rendering Total Scene {label}")
             x = self.encoder(x)
             h = self.sigma_net(x)
         else:
             x = self.encoder[0](x)
             h = self.sigma_net[0](x)
         # attempt merge of densities
-        if label == "all":
-            breakpoint()
+        # if label == "all":
+        #     breakpoint()
         # sigma = F.relu(h[..., 0])
         sigma = trunc_exp(h[..., 0])
-
         geo_feat = h[..., 1:]
-
         # color
         d = (d + 1) / 2  # tcnn SH encoding requires inputs to be in [0, 1]
         if label in self.semantic_objects:
@@ -231,7 +242,10 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
 
         # sigmoid activation for rgb
         color = torch.sigmoid(h)
-
+        # merge densities and color
+        if label == "all":
+            sigma, max_indices = torch.max(sigma, dim=0, keepdim=True)
+            color = torch.take_along_dim(color, max_indices, dim=0)
         return sigma, color
 
     # optimizer utils

@@ -5,7 +5,7 @@ import raymarching
 import torch
 import torch.nn as nn
 import trimesh
-
+import matplotlib.pyplot as plt
 from .utils import custom_meshgrid, extract_features
 
 
@@ -89,7 +89,8 @@ class MultiObjectNeRFRenderer(nn.Module):
         self.min_near = min_near
         self.density_thresh = density_thresh
         self.bg_radius = bg_radius  # radius of the background sphere.
-
+        # for training only
+        # self.semantic_objects = set()
         # prepare aabb with a 6D tensor (xmin, ymin, zmin, xmax, ymax, zmax)
         # NOTE: aabb (can be rectangular) is only used to generate points, we still rely on bound (always cubic) to calculate density grid and hashing.
         aabb_train = torch.FloatTensor([-bound, -bound, -bound, bound, bound, bound])
@@ -271,7 +272,7 @@ class MultiObjectNeRFRenderer(nn.Module):
             'weights_sum': weights_sum,
         }
 
-    def run_cuda(self, rays_o, rays_d, label="all", dt_gamma=0, bg_color=None, perturb=False,
+    def run_cuda(self, rays_o, rays_d, label=None, dt_gamma=0, bg_color=None, perturb=False,
                  force_all_rays=False, max_steps=1024,
                  T_thresh=1e-4, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
@@ -315,6 +316,7 @@ class MultiObjectNeRFRenderer(nn.Module):
             # density_outputs = self.density(xyzs) # [M,], use a dict since it may include extra things, like geo_feat for rgb.
             # sigmas = density_outputs['sigma']
             # rgbs = self.color(xyzs, dirs, **density_outputs)
+
             sigmas = self.density_scale * sigmas
 
             # print(f'valid RGB query ratio: {mask.sum().item() / mask.shape[0]} (total = {mask.sum().item()})')
@@ -573,36 +575,41 @@ class MultiObjectNeRFRenderer(nn.Module):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
         # return: pred_rgb: [B, N, 3]
 
-        if self.cuda_ray:
-            _run = self.run_cuda
-        else:
-            _run = self.run
-
-        B, N = rays_o.shape[:2]
-        device = rays_o.device
+        # if self.cuda_ray:
+        _run = self.run_cuda
+        # else:
+        #     _run = self.run
+        #
+        # B, N = rays_o.shape[:2]
+        # device = rays_o.device
 
         # never stage when cuda_ray
-        if staged and not self.cuda_ray:
-            depth = torch.empty((B, N), device=device)
-            image = torch.empty((B, N, 3), device=device)
-
-            for b in range(B):
-                head = 0
-                while head < N:
-                    tail = min(head + max_ray_batch, N)
-                    results_ = _run(rays_o[b:b + 1, head:tail], rays_d[b:b + 1, head:tail], **kwargs)
-                    depth[b:b + 1, head:tail] = results_['depth']
-                    image[b:b + 1, head:tail] = results_['image']
-                    head += max_ray_batch
-
-            results = {}
-            results['depth'] = depth
-            results['image'] = image
-
-        else:
-            results = _run(rays_o, rays_d, **kwargs)
-
-        return results
+        # if staged and not self.cuda_ray:
+        #     depth = torch.empty((B, N), device=device)
+        #     image = torch.empty((B, N, 3), device=device)
+        #     for b in range(B):
+        #         head = 0
+        #         while head < N:
+        #             tail = min(head + max_ray_batch, N)
+        #             results_ = _run(rays_o[b:b + 1, head:tail], rays_d[b:b + 1, head:tail], **kwargs)
+        #             depth[b:b + 1, head:tail] = results_['depth']
+        #             image[b:b + 1, head:tail] = results_['image']
+        #             head += max_ray_batch
+        #
+        #     results = {}
+        #     results['depth'] = depth
+        #     results['image'] = image
+        #
+        # else:
+        return_results = {}
+        for label in self.semantic_objects:
+            results = _run(rays_o, rays_d, label=label, **kwargs)
+            return_results[label] = results["image"]
+        results = _run(rays_o, rays_d, **kwargs)
+        return_results['image'] = results['image']
+        return_results['depth'] = results['depth']
+        # breakpoint()
+        return return_results
 
     def train_render(self, rays_o, rays_d, inds, loss=None, gt_rgb=None, staged=False, max_ray_batch=4096, **kwargs):
         # rays_o, rays_d: [B, N, 3], assumes B == 1
@@ -611,21 +618,26 @@ class MultiObjectNeRFRenderer(nn.Module):
         assert loss is not None and gt_rgb is not None and inds is not None
         # breakpoint()
         gt_rgb = gt_rgb.permute(0, 3, 1, 2)
-        results = extract_features(gt_rgb)[0]
-        detected_objects = set(results.boxes.cls.tolist())
+        # plt.imshow(gt_rgb.permute(0, 3, 2, 1)[0,].cpu())
+        yolo_results = extract_features(gt_rgb)[0]
+        detected_objects = list(set(yolo_results.boxes.cls.tolist()))
         gt_rgb = gt_rgb.permute(0, 3, 2, 1)
-        masks = torch.from_numpy(results.masks.data.cpu().numpy()).to(gt_rgb.device)
+        # breakpoint()
+        # plt.imsave("viz.jpg",(gt_rgb[0,].cpu().numpy()*255).astype(np.uint8))
+        masks = torch.from_numpy(yolo_results.masks.data.cpu().numpy()).to(gt_rgb.device)
         losses = []
         return_results = {}
+        # if self.cuda_ray:
+        # use only cuda during training
+        _run = self.run_cuda
         for idx in range(len(detected_objects) + 1):
-            if results:
-                if self.cuda_ray:
-                    _run = self.run_cuda
-                else:
-                    _run = self.run
+            if yolo_results:
 
+                # else:
+                #     _run = self.run
+                print("s",idx)
                 B, N = rays_o.shape[:2]
-                device = rays_o.device
+                # device = rays_o.device
                 # never stage when cuda_ray
                 # if staged and not self.cuda_ray:
                 #     depth = torch.empty((B, N), device=device)
@@ -643,38 +655,38 @@ class MultiObjectNeRFRenderer(nn.Module):
                 #     results['depth'] = depth
                 #     results['image'] = image
                 # else:
-                if idx < len(detected_objects) - 1 and self.training:
-                    # print("Single Object Scene Reconstrution")
+
+                if idx < len(detected_objects) - 1:
                     mask = masks[idx,]
-                    mask = torch.gather(mask.view(B, -1, 1), 1, torch.stack(1 * [inds], -1)).squeeze(-1)  # [B, N, 3/4]
-                    # breakpoint()
-                    rays_o[mask > 0] = torch.Tensor([0, 0, 0]).to(device)
-                    rays_d[mask > 0] = torch.Tensor([0, 0, 0]).to(device)
-                    results = _run(rays_o, rays_d, results.names[idx], **kwargs)
+                    mask_compressed = torch.gather(mask.view(B, -1, 1), 1, torch.stack(1 * [inds], -1)).squeeze(
+                        -1).unsqueeze(-1)  # [B, N, 3/4]
+                    rays_o_ = rays_o * mask_compressed
+                    rays_d_ = rays_d * mask_compressed
+                    results = _run(rays_o_, rays_d_, yolo_results.names[detected_objects[idx]], **kwargs)
                     if loss:
                         object_gt = gt_rgb[0,] * masks[idx,].unsqueeze(-1)
                         C = object_gt.shape[-1]
                         object_gt = torch.gather(object_gt.reshape(B, -1, C), 1,
                                                  torch.stack(C * [inds], -1))  # [B, N, 3/4]
-                        # breakpoint()
-                        # object_gt = torch.flatten(object_gt.unsqueeze(0), 1, 2)
-                        gt_rgb = torch.flatten(object_gt.unsqueeze(0), 1, 2)
-                        losses.append(torch.nn.functional.mse_loss(results["image"], object_gt))
+                        losses.append((0.4/len(self.semantic_objects))*torch.nn.functional.mse_loss(results["image"], object_gt))
+                    del rays_d_
+                    del rays_o_
+                    del results
+                    del mask_compressed
+                    del object_gt
 
-                        # breakpoint()
-                elif idx > len(detected_objects) - 1:
-                    # print("Total Scene Reconstrution")
+                    # torch.cuda.empty_cache()
+                else:
+                    print("Total Scene Reconstrution")
                     results = _run(rays_o, rays_d, "all", **kwargs)
                     if loss:
-                        object_gt = gt_rgb[0,] * masks[idx,].unsqueeze(-1)
+                        object_gt = gt_rgb
                         C = object_gt.shape[-1]
                         object_gt = torch.gather(object_gt.reshape(B, -1, C), 1,
                                                  torch.stack(C * [inds], -1))  # [B, N, 3/4]
-                        gt_rgb = torch.flatten(object_gt.unsqueeze(0), 1, 2)
-                        losses.append(torch.nn.functional.mse_loss(results["image"], object_gt))
-                return_results["gt_rgb"] = gt_rgb
-                return_results["image"] = results["image"]
-                return_results["depth"] = results["depth"]
-
+                        losses.append(0.6*torch.nn.functional.mse_loss(results["image"], object_gt))
+                        return_results["gt_rgb"] = gt_rgb
+                        return_results["image"] = results["image"]
+                        return_results["depth"] = results["depth"]
             return_results["loss"] = torch.sum(torch.stack(losses))
-            return return_results
+        return return_results

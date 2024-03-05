@@ -1,0 +1,1 @@
+ docker run --volume $(pwd):/home/nerf-ngp --env DISPLAY=$DISPLAY  --name nerf-container --volume /tmp/.X11-unix:/tmp/.X11-unix --volume /usr/local/:/usr/local --privileged --gpus all --runtime=nvidia -it nerf-ngp

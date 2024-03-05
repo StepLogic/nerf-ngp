@@ -10,7 +10,7 @@ from functools import partial
 from loss import huber_loss
 
 #torch.autograd.set_detect_anomaly(True)
-
+torch.set_warn_always(False)
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
@@ -101,7 +101,7 @@ if __name__ == '__main__':
         bg_radius=opt.bg_radius,
     )
     
-    print(model)
+    # print(model)
 
     criterion = torch.nn.MSELoss(reduction='none')
     #criterion = partial(huber_loss, reduction='none')
