@@ -3,7 +3,7 @@ import tinycudann as tcnn
 import torch
 import torch.nn as nn
 from activation import trunc_exp
-
+import torch.utils.checkpoint as checkpoint
 from .multi_object_renderer import MultiObjectNeRFRenderer
 
 
@@ -15,8 +15,16 @@ class MultiModelList(nn.ModuleList):
         super().__init__(*inputs)
         pass
 
-    def forward(self, *inputs, **kwargs):
-        return torch.stack([module(*inputs, **kwargs) for module in self])
+    def custom(self, idx):
+        def custom_forward(*inputs):
+            inputs = self[idx](inputs[0])
+            return inputs
+
+        return custom_forward
+
+    def forward(self, inputs, split=False):
+        return torch.stack(
+            [checkpoint.checkpoint(self.custom(idx), inputs,use_reentrant=True) for idx, module in enumerate(self)])
         # return torch.stack([module(*inputs, **kwargs) for module in self])
 
 
@@ -44,11 +52,32 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
         self.per_level_scale = np.exp2(np.log2(2048 * bound / 16) / (16 - 1))
         self.average_object_features = None
         self.semantic_objects = []
-        _encoder, _encoder_dir, _sigma_net, _color_net = self.init_submodule()
+        _encoder, _encoder_dir = self.init_submodule()
         self.encoder = MultiModelList([_encoder])
         self.encoder_dir = MultiModelList([_encoder_dir])
-        self.sigma_net = MultiModelList([_sigma_net])
-        self.color_net = MultiModelList([_color_net])
+        self.sigma_net = tcnn.Network(
+            n_input_dims=32,
+            n_output_dims=1 + self.geo_feat_dim,
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": self.hidden_dim,
+                "n_hidden_layers": self.num_layers - 1,
+            },
+        )
+        in_dim_color = self.encoder_dir[0].n_output_dims + self.geo_feat_dim
+        self.color_net = tcnn.Network(
+            n_input_dims=in_dim_color,
+            n_output_dims=3,
+            network_config={
+                "otype": "FullyFusedMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": self.hidden_dim_color,
+                "n_hidden_layers": self.num_layers_color - 1,
+            },
+        )
         self.optimizer = None
         self.update_optimizer = None
         # self.yolo = SemanticExtractor()
@@ -60,13 +89,11 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
 
     def add_new_head(self, label):
         if not label in self.semantic_objects:
-            print("\nAdding New Head\n")
+            # print("\nAdding New Head\n")
             self.semantic_objects.append(label)
-            _encoder, _encoder_dir, _sigma_net, _color_net = self.init_submodule()
+            _encoder, _encoder_dir = self.init_submodule()
             self.encoder.append(_encoder)
             self.encoder_dir.append(_encoder_dir)
-            self.sigma_net.append(_sigma_net)
-            self.color_net.append(_color_net)
             if self.update_optimizer is not None:
                 self.update_optimizer(params=self.get_params(lr=1e-2))
 
@@ -83,18 +110,6 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
             },
         )
 
-        sigma_net = tcnn.Network(
-            n_input_dims=32,
-            n_output_dims=1 + self.geo_feat_dim,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": self.hidden_dim,
-                "n_hidden_layers": self.num_layers - 1,
-            },
-        )
-
         encoder_dir = tcnn.Encoding(
             n_input_dims=3,
             encoding_config={
@@ -103,20 +118,7 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
             },
         )
 
-        in_dim_color = encoder_dir.n_output_dims + self.geo_feat_dim
-
-        color_net = tcnn.Network(
-            n_input_dims=in_dim_color,
-            n_output_dims=3,
-            network_config={
-                "otype": "FullyFusedMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": self.hidden_dim_color,
-                "n_hidden_layers": self.num_layers_color - 1,
-            },
-        )
-        return encoder, encoder_dir, sigma_net, color_net
+        return encoder, encoder_dir,
 
     def density(self, x, label=None, ):
         # x: [N, 3], in [-bound, bound]
@@ -126,14 +128,14 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
         if label in self.semantic_objects:
             idx = self.semantic_objects.index(label)
             x = self.encoder[idx](x)
-            h = self.sigma_net[idx](x)
+            # h = self.sigma_net[idx](x)
         elif label == 'all':
             x = self.encoder(x)
-            h = self.sigma_net(x)
+            # h = self.sigma_net(x, split=True)
         else:
             # breakpoint()
             x = self.encoder[0](x)
-            h = self.sigma_net[0](x)
+        h = self.sigma_net(x)
 
         # sigma = F.relu(h[..., 0])
         sigma = trunc_exp(h[..., 0])
@@ -172,13 +174,13 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
 
         h = torch.cat([d, geo_feat], dim=-1)
 
-        if label in self.semantic_objects:
-            idx = self.semantic_objects.index(label)
-            h = self.color_net[idx](h)
-        elif label == 'all':
-            h = self.color_net(h)
-        else:
-            h = self.color_net[0](h)
+        # if label in self.semantic_objects:
+        #     idx = self.semantic_objects.index(label)
+        #     h = self.color_net[idx](h)
+        # elif label == 'all':
+        #     h = self.color_net(h)
+        # else:
+        h = self.color_net(h)
         # sigmoid activation for rgb
         h = torch.sigmoid(h)
 
@@ -195,6 +197,7 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
         # x: [N, 3], in [-bound, bound]
         # d: [N, 3], nomalized in [-1, 1]
         # sigma
+
         x = (x + self.bound) / (2 * self.bound)  # to [0, 1]
         if label is not None and label != "all":
             if not label in self.semantic_objects:
@@ -206,46 +209,29 @@ class MultObjectNerf(MultiObjectNeRFRenderer):
         if label in self.semantic_objects:
             idx = self.semantic_objects.index(label)
             x = self.encoder[idx](x)
-            h = self.sigma_net[idx](x)
         elif label == 'all':
-            print(f"Rendering Total Scene {label}")
-            x = self.encoder(x)
-            h = self.sigma_net(x)
+            x = self.encoder.forward(x)
+            x = torch.mean(x, axis=0)
+
+
         else:
             x = self.encoder[0](x)
-            h = self.sigma_net[0](x)
-        # attempt merge of densities
-        # if label == "all":
-        #     breakpoint()
-        # sigma = F.relu(h[..., 0])
-        sigma = trunc_exp(h[..., 0])
-        geo_feat = h[..., 1:]
-        # color
+        # breakpoint()
+        h = self.sigma_net(x)
         d = (d + 1) / 2  # tcnn SH encoding requires inputs to be in [0, 1]
         if label in self.semantic_objects:
             idx = self.semantic_objects.index(label)
             d = self.encoder_dir[idx](d)
         elif label == 'all':
             d = self.encoder_dir(d)
+            d = torch.mean(d, axis=0)
         else:
             d = self.encoder_dir[0](d)
-
-        h = torch.cat([d, geo_feat], dim=-1)
-
-        if label in self.semantic_objects:
-            idx = self.semantic_objects.index(label)
-            h = self.color_net[idx](h)
-        elif label == 'all':
-            h = self.color_net(h)
-        else:
-            h = self.color_net[0](h)
-
-        # sigmoid activation for rgb
+        sigma = trunc_exp(h[..., 0])
+        geo_feat = h[..., 1:]
+        h = torch.cat([d, geo_feat], dim=-1)  # new idea check this variable better reconstruction
+        h = self.color_net(h)
         color = torch.sigmoid(h)
-        # merge densities and color
-        if label == "all":
-            sigma, max_indices = torch.max(sigma, dim=0, keepdim=True)
-            color = torch.take_along_dim(color, max_indices, dim=0)
         return sigma, color
 
     # optimizer utils

@@ -21,6 +21,7 @@ from rich.console import Console
 from torch_ema import ExponentialMovingAverage
 from torchmetrics.functional import structural_similarity_index_measure
 from ultralytics import YOLO
+import gc
 
 
 def extract_features(image):
@@ -986,6 +987,9 @@ class Trainer(object):
             loss_val = loss.item()
             total_loss += loss_val
 
+            # gc.collect()
+            #
+            # torch.cuda.empty_cache()
             if self.local_rank == 0:
                 if self.report_metric_at_train:
                     for metric in self.metrics:
@@ -1024,6 +1028,9 @@ class Trainer(object):
                 self.lr_scheduler.step()
 
         self.log(f"==> Finished Epoch {self.epoch}.")
+        gc.collect()
+
+        torch.cuda.empty_cache()
 
     def evaluate_one_epoch(self, loader, name=None):
         self.log(f"++> Evaluate at epoch {self.epoch} ...")
@@ -1081,7 +1088,7 @@ class Trainer(object):
                     truths = torch.cat(truths_list, dim=0)
                 else:
                     for label, pred_rgb in outputs.items():
-                        combined_objects[label] = preds_rgb  # [[B, ...], [B, ...], ...]
+                        combined_objects[label] = pred_rgb  # [[B, ...], [B, ...], ...]
                 loss_val = loss.item()
                 total_loss += loss_val
 
@@ -1115,7 +1122,7 @@ class Trainer(object):
                     pbar.update(loader.batch_size)
                     for label, image in combined_objects.items():
                         image = image[0].detach().cpu().numpy()
-                        image = (image * 255).astype(np.uint8)
+                        image = (image * 255).astype(np.uint8).reshape(640,640,3)
                         save_path = os.path.join(self.workspace, 'validation',
                                                  f'{name}_{label}_{self.local_step:04d}_rgb.png')
                         cv2.imwrite(save_path, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
@@ -1142,6 +1149,8 @@ class Trainer(object):
             self.ema.restore()
 
         self.log(f"++> Evaluate epoch {self.epoch} Finished.")
+        gc.collect()
+        torch.cuda.empty_cache()
 
     def save_checkpoint(self, name=None, full=False, best=False, remove_old=True):
 

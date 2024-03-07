@@ -313,6 +313,7 @@ class MultiObjectNeRFRenderer(nn.Module):
             # plot_pointcloud(xyzs.reshape(-1, 3).detach().cpu().numpy())
 
             sigmas, rgbs = self(xyzs, dirs, label=label)
+
             # density_outputs = self.density(xyzs) # [M,], use a dict since it may include extra things, like geo_feat for rgb.
             # sigmas = density_outputs['sigma']
             # rgbs = self.color(xyzs, dirs, **density_outputs)
@@ -322,29 +323,30 @@ class MultiObjectNeRFRenderer(nn.Module):
             # print(f'valid RGB query ratio: {mask.sum().item() / mask.shape[0]} (total = {mask.sum().item()})')
 
             # special case for CCNeRF's residual learning
-            if len(sigmas.shape) == 2:
-                K = sigmas.shape[0]
-                depths = []
-                images = []
-                for k in range(K):
-                    weights_sum, depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays,
-                                                                                 T_thresh)
-                    image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
-                    depth = torch.clamp(depth - nears, min=0) / (fars - nears)
-                    images.append(image.view(*prefix, 3))
-                    depths.append(depth.view(*prefix))
+            # if len(sigmas.shape) == 2:
+            #     K = sigmas.shape[0]
+            #     depths = []
+            #     images = []
+            #     for k in range(K):
+            #         weights_sum, depth, image = raymarching.composite_rays_train(sigmas[k], rgbs[k], deltas, rays,
+            #                                                                      T_thresh)
+            #         image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+            #         depth = torch.clamp(depth - nears, min=0) / (fars - nears)
+            #         images.append(image.view(*prefix, 3))
+            #         depths.append(depth.view(*prefix))
+            #
+            #     depth = torch.stack(depths, axis=0)  # [K, B, N]
+            #     image = torch.stack(images, axis=0)  # [K, B, N, 3]
+            #
+            # else:
 
-                depth = torch.stack(depths, axis=0)  # [K, B, N]
-                image = torch.stack(images, axis=0)  # [K, B, N, 3]
+            weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
+            image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
+            depth = torch.clamp(depth - nears, min=0) / (fars - nears)
 
-            else:
+            image = image.view(*prefix, 3)
 
-                weights_sum, depth, image = raymarching.composite_rays_train(sigmas, rgbs, deltas, rays, T_thresh)
-                image = image + (1 - weights_sum).unsqueeze(-1) * bg_color
-                depth = torch.clamp(depth - nears, min=0) / (fars - nears)
-                image = image.view(*prefix, 3)
-                depth = depth.view(*prefix)
-
+            depth = depth.view(*prefix)
             results['weights_sum'] = weights_sum
 
         else:
@@ -401,9 +403,9 @@ class MultiObjectNeRFRenderer(nn.Module):
             depth = torch.clamp(depth - nears, min=0) / (fars - nears)
             image = image.view(*prefix, 3)
             depth = depth.view(*prefix)
-
         results['depth'] = depth
         results['image'] = image
+
         return results
 
     @torch.no_grad()
@@ -604,6 +606,7 @@ class MultiObjectNeRFRenderer(nn.Module):
         return_results = {}
         for label in self.semantic_objects:
             results = _run(rays_o, rays_d, label=label, **kwargs)
+            # breakpoint()
             return_results[label] = results["image"]
         results = _run(rays_o, rays_d, **kwargs)
         return_results['image'] = results['image']
@@ -635,7 +638,7 @@ class MultiObjectNeRFRenderer(nn.Module):
 
                 # else:
                 #     _run = self.run
-                print("s",idx)
+                # print("s",idx)
                 B, N = rays_o.shape[:2]
                 # device = rays_o.device
                 # never stage when cuda_ray
@@ -663,12 +666,14 @@ class MultiObjectNeRFRenderer(nn.Module):
                     rays_o_ = rays_o * mask_compressed
                     rays_d_ = rays_d * mask_compressed
                     results = _run(rays_o_, rays_d_, yolo_results.names[detected_objects[idx]], **kwargs)
+                    # results = _run(rays_o, rays_d, yolo_results.names[detected_objects[idx]], **kwargs)
                     if loss:
-                        object_gt = gt_rgb[0,] * masks[idx,].unsqueeze(-1)
+                        object_gt = gt_rgb[0,] * mask.unsqueeze(-1)
                         C = object_gt.shape[-1]
                         object_gt = torch.gather(object_gt.reshape(B, -1, C), 1,
                                                  torch.stack(C * [inds], -1))  # [B, N, 3/4]
-                        losses.append((0.4/len(self.semantic_objects))*torch.nn.functional.mse_loss(results["image"], object_gt))
+                        total=1 if len(self.semantic_objects) == 0 else len(self.semantic_objects)
+                        losses.append((0.4/total)*torch.nn.functional.mse_loss(results["image"], object_gt))
                     del rays_d_
                     del rays_o_
                     del results
@@ -677,7 +682,8 @@ class MultiObjectNeRFRenderer(nn.Module):
 
                     # torch.cuda.empty_cache()
                 else:
-                    print("Total Scene Reconstrution")
+                    # print("Total Scene Reconstrution")
+
                     results = _run(rays_o, rays_d, "all", **kwargs)
                     if loss:
                         object_gt = gt_rgb
@@ -685,8 +691,9 @@ class MultiObjectNeRFRenderer(nn.Module):
                         object_gt = torch.gather(object_gt.reshape(B, -1, C), 1,
                                                  torch.stack(C * [inds], -1))  # [B, N, 3/4]
                         losses.append(0.6*torch.nn.functional.mse_loss(results["image"], object_gt))
-                        return_results["gt_rgb"] = gt_rgb
+                        return_results["gt_rgb"] = object_gt
                         return_results["image"] = results["image"]
                         return_results["depth"] = results["depth"]
+            # del gt_rgb
             return_results["loss"] = torch.sum(torch.stack(losses))
         return return_results
